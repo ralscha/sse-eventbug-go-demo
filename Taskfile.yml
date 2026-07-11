@@ -1,0 +1,48 @@
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    silent: true
+    cmds:
+      - task --list
+
+  demo:
+    desc: Run client and server in development mode
+    deps: [client, server]
+
+  server:
+    desc: Run the Go backend on port 8080
+    cmds:
+      - go run .
+
+  client:
+    desc: Start the Vite client on port 5173
+    dir: client
+    deps: [client-install]
+    cmds:
+      - npm run dev -- --host
+
+  client-install:
+    desc: Install frontend dependencies
+    dir: client
+    cmds:
+      - npm install
+
+  client-build:
+    desc: Build the frontend
+    dir: client
+    deps: [client-install]
+    cmds:
+      - npm run build
+
+  test:
+    desc: Run backend tests
+    cmds:
+      - go test ./...
+
+  build:
+    desc: Build the backend and frontend
+    cmds:
+      - go build ./...
+      - task: client-build
