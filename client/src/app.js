@@ -7,6 +7,7 @@ export default class App {
     constructor() {
         this.names = ['s1', 's2', 's3', 's4', 's5'];
         this.gauges = [];
+        this.onResize = () => this.gauges.forEach((gauge) => gauge.resize());
 
         const threshold = [0.1, 0.2, 0.7, 0.5, 0.9];
 
@@ -15,10 +16,12 @@ export default class App {
             chart.setOption(this.getChartOption(name, threshold[index]));
             this.gauges.push(chart);
         }
+        window.addEventListener('resize', this.onResize);
     }
 
     start() {
-        this.eventSource = new EventSource(`register/${crypto.randomUUID()}`);
+        this.stop();
+        this.eventSource = new EventSource(`/register/${crypto.randomUUID()}`);
         this.eventSource.addEventListener('message', this.onMessage.bind(this), false);
         this.eventSource.addEventListener('dto', m => console.log(m));
         this.eventSource.onerror = this.onError;
@@ -33,9 +36,10 @@ export default class App {
     }
 
     onMessage(response) {
-        const splitted = response.data.split('\n');
-        for (const line of splitted) {
-            this.handleResponse(JSON.parse(line));
+        try {
+            this.handleResponse(JSON.parse(response.data));
+        } catch (error) {
+            console.error('Invalid gauge event', error);
         }
     }
 
@@ -48,6 +52,9 @@ export default class App {
     }
 
     handleResponse(data) {
+        if (!Array.isArray(data) || data.length !== this.gauges.length) {
+            return;
+        }
         for (const [index, gauge] of this.gauges.entries()) {
             gauge.setOption({
                 series: {

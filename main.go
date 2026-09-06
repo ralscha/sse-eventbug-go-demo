@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"math/rand/v2"
@@ -23,7 +22,9 @@ type dto struct {
 }
 
 func main() {
-	bus, err := sseeventbus.New()
+	bus, err := sseeventbus.New(
+		sseeventbus.WithClientExpiration(time.Minute, time.Minute),
+	)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -32,14 +33,49 @@ func main() {
 	defer stop()
 	go emitData(ctx, bus)
 
+	server := &http.Server{Addr: ":8080", Handler: newHandler(bus), ReadHeaderTimeout: 5 * time.Second}
+	serveErrors := make(chan error, 1)
+	go func() {
+		log.Printf("backend listening on http://localhost%s", server.Addr)
+		serveErrors <- server.ListenAndServe()
+	}()
+
+	var serveErr error
+	select {
+	case <-ctx.Done():
+	case serveErr = <-serveErrors:
+		stop()
+	}
+
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := bus.Close(closeCtx); err != nil {
+		log.Printf("close event bus: %v", err)
+	}
+	cancelClose()
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shut down HTTP server: %v", err)
+	}
+	cancelShutdown()
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		log.Fatal(serveErr)
+	}
+}
+
+func newHandler(bus *sseeventbus.Bus) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /register/{id}", func(w http.ResponseWriter, r *http.Request) {
 		clientID := strings.TrimSpace(r.PathValue("id"))
-		w.Header().Set("Cache-Control", "no-store")
+		if clientID == "" || len(clientID) > 128 {
+			http.Error(w, "invalid client ID", http.StatusBadRequest)
+			return
+		}
 		if err := httpadapter.Serve(w, r, bus, clientID,
-			httpadapter.WithTimeout(30*time.Second),
-			httpadapter.WithRegistration(sseeventbus.SubscribeTo(sseeventbus.DefaultEvent, "dto")),
-		); err != nil && !errors.Is(err, sseeventbus.ErrClosed) {
+			httpadapter.WithTimeout(0),
+			httpadapter.WithWriteTimeout(10*time.Second),
+			httpadapter.WithRegistration(sseeventbus.ReplaceSubscriptions(sseeventbus.DefaultEvent, "dto")),
+		); err != nil && !errors.Is(err, sseeventbus.ErrClosed) && !errors.Is(err, context.Canceled) {
 			log.Printf("SSE client %q: %v", clientID, err)
 		}
 	})
@@ -47,19 +83,7 @@ func main() {
 		mux.Handle("/", http.FileServer(http.Dir("client/dist")))
 	}
 
-	server := &http.Server{Addr: ":8080", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		log.Printf("backend listening on http://localhost%s", server.Addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
-		}
-	}()
-	<-ctx.Done()
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
-	_ = bus.Close(shutdownCtx)
+	return mux
 }
 
 func emitData(ctx context.Context, bus *sseeventbus.Bus) {
@@ -78,8 +102,7 @@ func emitData(ctx context.Context, bus *sseeventbus.Bus) {
 		for i := range values {
 			values[i] = rand.IntN(31)
 		}
-		encoded, _ := json.Marshal(values)
-		if err := bus.Publish(ctx, sseeventbus.NewEvent(string(encoded))); err != nil && !errors.Is(err, context.Canceled) {
+		if err := bus.Publish(ctx, sseeventbus.NewEvent(values)); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("publish gauges: %v", err)
 		}
 		if err := bus.Publish(ctx, sseeventbus.NewNamedEventWithData("dto", dto{I: 10, S: "test"})); err != nil && !errors.Is(err, context.Canceled) {
